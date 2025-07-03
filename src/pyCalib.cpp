@@ -308,138 +308,153 @@ Eigen::Vector3d calculateEulerAngles(const Eigen::Matrix3d& R) {
 }
 
 
+/**
+ * [功能描述]：激光雷达-旋转平台标定函数，通过优化求解激光雷达与旋转平台之间的外参
+ * @param mountingParam：初始安装参数向量，包含旋转角度(3个)、平移向量(3个)和时间偏移(1个)
+ * @param raw_data：原始数据数组，包含变换后的点云坐标、原始坐标、强度、旋转角度、时间戳等
+ * @param optimizeTime：优化迭代次数
+ * @param voxelSize：体素化降采样的体素大小
+ * @return 返回优化后的最终安装参数向量
+ */
 std::vector<double> Calib(std::vector<double> mountingParam, py::array_t<double> raw_data, int optimizeTime, double voxelSize)
 {
-
+    // 初始化最终安装参数向量（7个参数：3个旋转角度 + 3个平移 + 1个时间偏移）
     std::vector<double> finalMountingParam;
     finalMountingParam.resize(7);
-    finalMountingParam[0] = mountingParam[0];
-    finalMountingParam[1] = mountingParam[1];
-    finalMountingParam[2] = mountingParam[2];
-    finalMountingParam[3] = mountingParam[3];
-    finalMountingParam[4] = mountingParam[4];
-    finalMountingParam[5] = mountingParam[5];
-    finalMountingParam[6] = mountingParam[6];
+    finalMountingParam[0] = mountingParam[0];  // 绕Z轴旋转角度
+    finalMountingParam[1] = mountingParam[1];  // 绕Y轴旋转角度
+    finalMountingParam[2] = mountingParam[2];  // 绕X轴旋转角度
+    finalMountingParam[3] = mountingParam[3];  // X方向平移
+    finalMountingParam[4] = mountingParam[4];  // Y方向平移
+    finalMountingParam[5] = mountingParam[5];  // Z方向平移
+    finalMountingParam[6] = mountingParam[6];  // 时间偏移
 
-
+    // 获取原始数据的维度信息
     py::buffer_info buffer_info_raw = raw_data.request();
-    int rows = buffer_info_raw.shape[0];
-    int cols = buffer_info_raw.shape[1];
+    int rows = buffer_info_raw.shape[0];  // 数据行数（点的数量）
+    int cols = buffer_info_raw.shape[1];  // 数据列数（每个点的属性数量）
 
     std::cout << "rows: " << rows << "\n";
     std::cout << "cols: " << cols << "\n";
     std::cout << "voxelSize: " << voxelSize << "\n";
 
+    // 初始化外参：旋转矩阵（使用Sophus库）和平移向量
+    Sophus::SO3d ex_a_l_so3;     // 旋转矩阵（SO3群）
+    Eigen::Vector3d ex_a_l_trans; // 平移向量
    
-    Sophus::SO3d ex_a_l_so3;
-    Eigen::Vector3d ex_a_l_trans;
-   
+    // 根据ZYX欧拉角构建初始旋转矩阵
     Eigen::Quaterniond q = Eigen::Quaterniond((Eigen::AngleAxisd(finalMountingParam[0], Eigen::Vector3d::UnitZ()) *
                                                  Eigen::AngleAxisd(finalMountingParam[1], Eigen::Vector3d::UnitY()) *
                                                  Eigen::AngleAxisd(finalMountingParam[2], Eigen::Vector3d::UnitX())).matrix());
-    ex_a_l_so3.setQuaternion(q); 
-    ex_a_l_trans = Eigen::Vector3d(finalMountingParam[3], finalMountingParam[4], finalMountingParam[5]);
+    ex_a_l_so3.setQuaternion(q);  // 设置旋转矩阵
+    ex_a_l_trans = Eigen::Vector3d(finalMountingParam[3], finalMountingParam[4], finalMountingParam[5]);  // 设置平移向量
 
-    
+    // 获取原始数据指针
     double* input_ptr = static_cast<double*>(buffer_info_raw.ptr);
 
-   
+    // 进行多次优化迭代
     for (size_t i = 0; i < optimizeTime; i++)
     {
+        // 创建点云容器
+        pcl::PointCloud<pcl::PointXYZ>::Ptr raw_cloud(new pcl::PointCloud<pcl::PointXYZ>);      // 原始点云
+        pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>);          // 变换后的点云
 
-        pcl::PointCloud<pcl::PointXYZ>::Ptr raw_cloud(new pcl::PointCloud<pcl::PointXYZ>);
-        pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>);
+        // 创建平面特征数据和对应关系容器
+        std::vector<PlaneFactorData> factors;            // 平面特征数据
+        std::vector<CorrespondenceInfo> allCorres;       // 所有对应关系
 
-      
-        std::vector<PlaneFactorData> factors;
-        std::vector<CorrespondenceInfo> allCorres;
-
-      
-        std::vector<double> rotorAngles;
-        std::vector<double> rotorSpeeds;
+        // 存储旋转角度和角速度信息
+        std::vector<double> rotorAngles;   // 旋转角度数组
+        std::vector<double> rotorSpeeds;   // 旋转角速度数组
     
-     
+        // 遍历所有数据点，进行坐标变换
         for (size_t j = 1; j < rows; j++)
         {
+            // 提取激光雷达坐标系下的点坐标
             Eigen::Vector3d pt_l;
-            pt_l(0) = input_ptr[j*cols + 3];
-            pt_l(1) = input_ptr[j*cols + 4];
-            pt_l(2) = input_ptr[j*cols + 5];
+            pt_l(0) = input_ptr[j*cols + 3];  // 原始点云X坐标
+            pt_l(1) = input_ptr[j*cols + 4];  // 原始点云Y坐标
+            pt_l(2) = input_ptr[j*cols + 5];  // 原始点云Z坐标
 
-           
+            // 过滤距离过近的点（可能是噪声）
             if (pt_l.norm() < 5)
             {
                 continue;
             }
             
-            double intensity = input_ptr[j*cols + 6];
-            double rotAngular = input_ptr[j*cols + 7];
+            // 提取点的属性信息
+            double intensity = input_ptr[j*cols + 6];    // 强度值
+            double rotAngular = input_ptr[j*cols + 7];   // 旋转角度
 
-          
+            // 计算旋转角速度（当前角度与前一个角度的差值除以时间差）
             double rotSpeed = (input_ptr[j*cols + 7] - input_ptr[(j-1)*cols + 7]) / ((input_ptr[j*cols + 8] - input_ptr[(j-1)*cols + 8]));
 
+            // 存储角度和角速度信息
             rotorAngles.push_back(rotAngular);
             rotorSpeeds.push_back(rotSpeed);
 
-            
+            // 将点从激光雷达坐标系变换到世界坐标系
+            // 变换顺序：1) 激光雷达坐标系到旋转平台坐标系  2) 旋转平台坐标系到世界坐标系
             Eigen::Vector3d pt_w = Eigen::AngleAxisd(rotAngular, Eigen::Vector3d::UnitZ()) *
                                    (ex_a_l_so3.matrix() * pt_l + ex_a_l_trans);
+            
+            // 创建PCL点云格式的点
             pcl::PointXYZ pt_pcl, pt_pcl_w;
-            pt_pcl.x = pt_l(0);
+            pt_pcl.x = pt_l(0);   // 原始点云
             pt_pcl.y = pt_l(1);
             pt_pcl.z = pt_l(2);
             raw_cloud->push_back(pt_pcl);
 
-            pt_pcl_w.x = pt_w(0);
+            pt_pcl_w.x = pt_w(0); // 变换后的点云
             pt_pcl_w.y = pt_w(1);
             pt_pcl_w.z = pt_w(2);
             cloud->push_back(pt_pcl_w);
         }
 
-     
+        // 构建KD树用于邻域搜索
         pcl::KdTreeFLANN<pcl::PointXYZ> kdtree;
         kdtree.setInputCloud(cloud);
 
         std::cout << "cloud size: " << cloud->size() << "\n";
         
-      
+        // 使用体素化降采样减少计算量
         pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_kernel(new pcl::PointCloud<pcl::PointXYZ>);
         pcl::VoxelGrid<pcl::PointXYZ> sor;
         sor.setInputCloud(cloud);
-        sor.setLeafSize(voxelSize, voxelSize, voxelSize);
-        sor.filter(*cloud_kernel);
+        sor.setLeafSize(voxelSize, voxelSize, voxelSize);  // 设置体素大小
+        sor.filter(*cloud_kernel);  // 执行降采样
         std::cout << "cloud_kernel size: " << cloud_kernel->size() << "\n";
 
-
-  
+        // 对每个降采样后的点进行平面特征提取
         for (size_t j = 0; j < cloud_kernel->size(); j++)
         {
-            
+            // 获取当前中心点
             pcl::PointXYZ centerPt = cloud_kernel->points[j];
-            std::vector<int> pointIdxRadiusSearch;
-            std::vector<float> pointRadiusSquaredDistance;
+            std::vector<int> pointIdxRadiusSearch;          // 半径搜索结果索引
+            std::vector<float> pointRadiusSquaredDistance;  // 半径搜索结果距离
 
-            
+            // 在中心点周围搜索邻域点
             kdtree.radiusSearch(centerPt, 1.5 * voxelSize, pointIdxRadiusSearch, pointRadiusSquaredDistance);
 
-            
+            // 检查邻域点数量是否足够进行平面拟合
             if (pointIdxRadiusSearch.size() < 10)
             {
                 continue;
             }
 
-       
-            std::vector<Eigen::Vector3d> tmp_rawpts;
-            std::vector<double> tmp_rotors;
-            std::vector<double> tmp_rotorspeeds;
-            Eigen::MatrixXd pointCloudMatrix(3, pointIdxRadiusSearch.size());
+            // 收集邻域点的信息
+            std::vector<Eigen::Vector3d> tmp_rawpts;      // 原始点坐标
+            std::vector<double> tmp_rotors;               // 旋转角度
+            std::vector<double> tmp_rotorspeeds;          // 旋转角速度
+            Eigen::MatrixXd pointCloudMatrix(3, pointIdxRadiusSearch.size());  // 点云矩阵
+            
             for (size_t k = 0; k < pointIdxRadiusSearch.size(); k++)
             {
                 int idx = pointIdxRadiusSearch[k];
                 pcl::PointXYZ pt_w = cloud->points[idx];
                 pointCloudMatrix.col(k) = Eigen::Vector3d(pt_w.x, pt_w.y, pt_w.z);
 
-              
+                // 获取对应的原始点和旋转信息
                 pcl::PointXYZ pt_l = raw_cloud->points[idx];
                 double rotorAngle = rotorAngles[idx];
 
@@ -448,46 +463,47 @@ std::vector<double> Calib(std::vector<double> mountingParam, py::array_t<double>
                 tmp_rotorspeeds.push_back(rotorSpeeds[idx]);
             }
 
-          
+            // 使用SVD进行平面拟合
             Eigen::Matrix3Xd centeredPointCloud = pointCloudMatrix.colwise() - pointCloudMatrix.rowwise().mean();
             Eigen::JacobiSVD<Eigen::Matrix3Xd> svd(centeredPointCloud, Eigen::ComputeFullU);
 
-            
-            double sigma0 = svd.singularValues()(0);
-            double sigma1 = svd.singularValues()(1);
-            double sigma2 = svd.singularValues()(2);
+            // 获取奇异值，用于判断平面特征的质量
+            double sigma0 = svd.singularValues()(0);  // 最大奇异值
+            double sigma1 = svd.singularValues()(1);  // 第二大奇异值
+            double sigma2 = svd.singularValues()(2);  // 最小奇异值
 
-          
+            // 检查是否为良好的平面特征（最大奇异值与第二大奇异值的比值）
             if ((sigma0 - sigma1) / sigma0 > 0.5)
             {
-                continue;
+                continue;  // 不是好的平面特征，跳过
             }
             else
             {
-               
+                // 提取平面法向量（最小奇异值对应的特征向量）
                 Eigen::Vector3d normal = svd.matrixU().col(2);
                 normal.normalize();
 
+                // 创建平面特征数据
                 PlaneFactorData tmpFactorData;
                 tmpFactorData.norm = normal;
                 tmpFactorData.rawPts = tmp_rawpts;
                 tmpFactorData.rotorAngles = tmp_rotors;
                 factors.push_back(tmpFactorData);
 
-                
+                // 为每个点对创建对应关系（用于优化）
                 for (size_t k = 1; k < tmp_rawpts.size(); k++)
                 {
                     CorrespondenceInfo tmpCorres;
-                    tmpCorres.norm = normal;
-                    tmpCorres.ref_pt = tmp_rawpts[0];
-                    tmpCorres.ref_angle = tmp_rotors[0];
-                    tmpCorres.src_pt = tmp_rawpts[k];
-                    tmpCorres.src_angle = tmp_rotors[k];
-                    tmpCorres.ref_angle_speed = tmp_rotorspeeds[0];
-                    tmpCorres.src_angle_speed = tmp_rotorspeeds[k];
-                    tmpCorres.weight = 1.0;
+                    tmpCorres.norm = normal;                    // 平面法向量
+                    tmpCorres.ref_pt = tmp_rawpts[0];          // 参考点
+                    tmpCorres.ref_angle = tmp_rotors[0];       // 参考点旋转角度
+                    tmpCorres.src_pt = tmp_rawpts[k];          // 源点
+                    tmpCorres.src_angle = tmp_rotors[k];       // 源点旋转角度
+                    tmpCorres.ref_angle_speed = tmp_rotorspeeds[0];  // 参考点角速度
+                    tmpCorres.src_angle_speed = tmp_rotorspeeds[k];  // 源点角速度
+                    tmpCorres.weight = 1.0;                    // 权重
 
-                   
+                    // 只保留角度差异较大的点对（确保几何约束有效）
                     if (fabs(tmpCorres.ref_angle - tmpCorres.src_angle) < M_PI / 3)
                     {
                         continue;
@@ -496,23 +512,27 @@ std::vector<double> Calib(std::vector<double> mountingParam, py::array_t<double>
                 }
             }
         }
-      
+        
         std::cout << "allCorres size: " << allCorres.size() << "\n";
-       
+        
+        // 构建Ceres优化问题
         ceres::Problem problem;
         
+        // 添加旋转参数块（使用自定义的SO3参数化）
         problem.AddParameterBlock(ex_a_l_so3.data(), 4, new RollPitchSO3Parameterization());
         
+        // 添加平移参数块
         problem.AddParameterBlock(ex_a_l_trans.data(), 3);
 
+        // 添加时间偏移参数块
         problem.AddParameterBlock(&finalMountingParam[6], 1);
 
-     
+        // 为每个对应关系添加残差块
         for (size_t j = 0; j < allCorres.size(); j++)
         {
-            ceres::CostFunction *cost = PlaneFunctor::Create(allCorres[j]);
-           
-            ceres::LossFunction* loss_function = new ceres::HuberLoss(0.3);
+            ceres::CostFunction *cost = PlaneFunctor::Create(allCorres[j]);  // 创建平面约束的代价函数
+            
+            ceres::LossFunction* loss_function = new ceres::HuberLoss(0.3);  // 使用Huber损失函数增强鲁棒性
             problem.AddResidualBlock(cost,
                                      loss_function,
                                      ex_a_l_so3.data(), ex_a_l_trans.data(),
@@ -521,33 +541,36 @@ std::vector<double> Calib(std::vector<double> mountingParam, py::array_t<double>
 
         std::cout << "finish construct problem\n";
 
-     
+        // 设置Ceres求解器选项
         ceres::Solver::Options options;
-        options.linear_solver_type = ceres::DENSE_SCHUR;
-        options.sparse_linear_algebra_library_type = ceres::SUITE_SPARSE;
-        options.trust_region_strategy_type = ceres::LEVENBERG_MARQUARDT;
-        options.minimizer_progress_to_stdout = true;
-      
-        options.num_threads = 20;
+        options.linear_solver_type = ceres::DENSE_SCHUR;                        // 线性求解器类型
+        options.sparse_linear_algebra_library_type = ceres::SUITE_SPARSE;       // 稀疏线性代数库
+        options.trust_region_strategy_type = ceres::LEVENBERG_MARQUARDT;        // 信赖域策略
+        options.minimizer_progress_to_stdout = true;                            // 输出优化进度
+        options.num_threads = 20;                                               // 线程数
+
+        // 执行优化
         ceres::Solver::Summary summary;
         ceres::Solve(options, &problem, &summary);
+        
+        // 输出当前迭代的优化结果
         std::cout << "ex_a_l.rotationMatrix(): " << ex_a_l_so3.matrix() << "\n";
         std::cout << "ex_a_l.translation(): " << ex_a_l_trans << "\n";
         std::cout << "dt : " << finalMountingParam[6] << "\n";
     }
     
-  
+    // 将优化后的旋转矩阵转换为欧拉角
     Eigen::Vector3d angles = calculateEulerAngles(ex_a_l_so3.matrix());
 
-    finalMountingParam[0] = angles[0];
-    finalMountingParam[1] = angles[1];
-    finalMountingParam[2] = angles[2];
+    // 更新最终参数
+    finalMountingParam[0] = angles[0];        // 绕Z轴旋转角度
+    finalMountingParam[1] = angles[1];        // 绕Y轴旋转角度
+    finalMountingParam[2] = angles[2];        // 绕X轴旋转角度
+    finalMountingParam[3] = ex_a_l_trans[0];  // X方向平移
+    finalMountingParam[4] = ex_a_l_trans[1];  // Y方向平移
+    finalMountingParam[5] = ex_a_l_trans[2];  // Z方向平移
 
-    finalMountingParam[3] = ex_a_l_trans[0];
-    finalMountingParam[4] = ex_a_l_trans[1];
-    finalMountingParam[5] = ex_a_l_trans[2];
-
- 
+    // 返回最终的标定参数
     return finalMountingParam;
 }
 

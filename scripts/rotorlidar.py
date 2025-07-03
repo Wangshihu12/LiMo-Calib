@@ -70,38 +70,49 @@ def visualize_normal_distribution(normals, title, output_path, before_after="bef
     plt.close()
 
 def main():
+    """
+    [功能描述]：激光雷达-旋转平台标定主函数，执行完整的标定流程包括数据加载、初始投影、优化标定和重加权优化
+    @param 无参数
+    @return 无返回值，处理结果保存为点云文件
+    """
 
-
+    # 设置原始数据路径并加载npz格式的标定数据
     rotlidarpath_npz = "/home/leo/workspace/data/motor_calibration_data/c.npz"
-    rawdata = np.load(rotlidarpath_npz)
-    rawdata = rawdata['arr_0']
+    rawdata = np.load(rotlidarpath_npz)  # 加载numpy压缩数组文件
+    rawdata = rawdata['arr_0']           # 提取数组数据（包含点云坐标、强度、角度、时间等信息）
     
-    # 1. Save the original point cloud (a.pcd) using initial extrinsic parameters
-    initial_params = [0,-math.radians(60), 0, 0, 0, 0, 0]
+    # 步骤1：使用初始外参参数投影点云并保存原始结果
+    # 初始参数：[绕Z轴旋转角, 绕Y轴旋转角, 绕X轴旋转角, X平移, Y平移, Z平移, 时间偏移]
+    initial_params = [0,-math.radians(60), 0, 0, 0, 0, 0]  # 初始Y轴旋转角度为-60度
     pyCalib.ProjectionUsingCalibParam("/home/leo/workspace/data/motor_calibration_data/a.pcd",
-                                      initial_params, rawdata[0:500000, :])
-    print("Saved original point cloud: a.pcd")
+                                      initial_params, rawdata[0:500000, :])  # 使用前50万个点进行投影
+    print("Saved original point cloud: a.pcd")  # 输出保存信息
     
-    # 2. Optimization of hte calibration parameters and record the execution time
-    start_time = time.perf_counter()
+    # 步骤2：执行标定参数优化并记录执行时间
+    start_time = time.perf_counter()  # 记录开始时间（高精度计时器）
+    # 调用标定函数：初始参数、原始数据、优化次数(1次)、体素大小(1.0米)
     accurateValues = pyCalib.Calib(initial_params, rawdata[0:500000, :], 1, 1.0)
-    elapsed = time.perf_counter() - start_time
-    print("Calib returned parameters:", accurateValues)
-    print(f"Calib took {elapsed:.3f} seconds")
+    elapsed = time.perf_counter() - start_time  # 计算优化耗时
+    print("Calib returned parameters:", accurateValues)    # 输出优化后的参数
+    print(f"Calib took {elapsed:.3f} seconds")            # 输出执行时间（保留3位小数）
+    
+    # 使用优化后的参数重新投影点云并保存精细标定结果
     pyCalib.ProjectionUsingCalibParam("/home/leo/workspace/data/motor_calibration_data/a_fine_v1_p0.3.pcd",
                                       accurateValues, rawdata[0:500000, :])
-    print("Saved fine calibrated point cloud: a_fine.pcd")
+    print("Saved fine calibrated point cloud: a_fine.pcd")  # 输出保存信息
     
-    # 3. Re-weighted optimization: Record the execution time of the Calib_reweight function
-    start_time = time.perf_counter()
+    # 步骤3：执行重加权优化（提高标定精度）并记录执行时间
+    start_time = time.perf_counter()  # 重新记录开始时间
+    # 调用重加权标定函数：初始参数、原始数据、优化次数(1次)、体素大小(2.0米)
     reweightedValues = pyCalib.Calib_reweight(initial_params, rawdata[0:500000, :], 1, 2.0)
-    elapsed = time.perf_counter() - start_time
-    print("Calib_reweight returned parameters:", reweightedValues)
-    print(f"Calib_reweight took {elapsed:.3f} seconds")
+    elapsed = time.perf_counter() - start_time  # 计算重加权优化耗时
+    print("Calib_reweight returned parameters:", reweightedValues)  # 输出重加权后的参数
+    print(f"Calib_reweight took {elapsed:.3f} seconds")           # 输出执行时间
     
+    # 使用重加权优化后的参数投影点云并保存最终结果
     pyCalib.ProjectionUsingCalibParam("/home/leo/workspace/data/motor_calibration_data/c_fine_reweighted_v2.0_p0.7.pcd",
                                        reweightedValues, rawdata[0:500000, :])
-    print("Saved reweighted calibrated point cloud: a_fine_reweighted.pcd")
+    print("Saved reweighted calibrated point cloud: a_fine_reweighted.pcd")  # 输出保存信息
 
 if __name__ == '__main__':
     main()
